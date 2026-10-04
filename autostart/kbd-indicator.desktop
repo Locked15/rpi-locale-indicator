@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Keyboard layout indicator
+Exec=sh -c "exec ~/.local/bin/kbd-indicator >/dev/null 2>&1 || true"
+OnlyShowIn=LXDE;
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Optional tray indicator for current XKB layout. Any failure -> silent exit 0.
+
+Docks a flat GtkButton into the panel system tray (XEmbed) so it gets the
+theme's hover highlight and the system UI font, like native panel plugins.
+"""
+import sys
+
+def main():
+    import ctypes, ctypes.util
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gtk, Gdk, GLib
+
+    x11 = ctypes.CDLL(ctypes.util.find_library("X11"))
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XGetSelectionOwner.restype = ctypes.c_ulong
+    x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                               ctypes.c_long, ctypes.c_void_p]
+    x11.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+    x11.XkbLockGroup.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+    x11.XFlush.argtypes = [ctypes.c_void_p]
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dpy = x11.XOpenDisplay(None)
+    if not dpy:
+        return
+
+    names = ["US", "RU"]
+    buf = ctypes.create_string_buffer(64)
+
+    def group():
+        x11.XkbGetState(dpy, 0x100, buf)
+        return buf.raw[0]
+
+    manager = x11.XGetSelectionOwner(dpy, x11.XInternAtom(dpy, b"_NET_SYSTEM_TRAY_S0", 0))
+    if not manager:
+        return
+
+    css = Gtk.CssProvider()
+    # Theme-derived colours: follow light/dark GTK theme (also on live switch).
+    css.load_from_data(b"""
+        window, button { background: @theme_bg_color; color: @theme_fg_color;
+                         border: none; box-shadow: none; border-radius: 0; }
+        button:hover { background: mix(@theme_bg_color, @theme_fg_color, 0.1); }
+        button:active { background: mix(@theme_bg_color, @theme_fg_color, 0.2); }
+    """)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    button = Gtk.Button(label="")
+    button.set_relief(Gtk.ReliefStyle.NONE)
+    button.set_can_focus(False)
+    plug = Gtk.Plug.new(0)
+    plug.add(button)
+    plug.set_size_request(40, 36)
+    plug.show_all()
+
+    state = {"g": -1}
+
+    def update():
+        try:
+            g = group()
+            if g != state["g"]:
+                state["g"] = g
+                n = names[g] if g < len(names) else str(g)
+                button.set_label(n)
+                button.set_tooltip_text("Keyboard layout: " + n)
+        except Exception:
+            pass
+        return True
+
+    def click(_):
+        x11.XkbLockGroup(dpy, 0x100, (group() + 1) % len(names))
+        x11.XFlush(dpy)
+        update()
+
+    button.connect("clicked", click)
+    plug.connect("destroy", lambda *_: Gtk.main_quit())
+    update()
+
+    # XClientMessageEvent: type,serial,send_event,display,window,message_type,format,data.l[5]
+    class Msg(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                    ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                    ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                    ("format", ctypes.c_int), ("l", ctypes.c_long * 5)]
+    m = Msg()
+    m.type = 33  # ClientMessage
+    m.window = manager
+    m.message_type = x11.XInternAtom(dpy, b"_NET_SYSTEM_TRAY_OPCODE", 0)
+    m.format = 32
+    m.l[0] = 0  # CurrentTime
+    m.l[1] = 0  # SYSTEM_TRAY_REQUEST_DOCK
+    m.l[2] = plug.get_id()
+    x11.XSendEvent(dpy, manager, 0, 0, ctypes.byref(m))
+    x11.XSync(dpy, 0)
+
+    GLib.timeout_add(300, update)
+    Gtk.main()
+
+try:
+    main()
+except BaseException:
+    pass
+sys.exit(0)
